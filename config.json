@@ -1,1 +1,9 @@
-
+{
+  "ControllerUrl": "https://unifi.yourdomain.local",
+  "Site": "default",
+  "ExpectedDnsServer": "192.168.0.10",
+  "ExpectedLanSubnet": "192.168.0.0/24",
+  "ExpectedSsids": [
+    "WiFi SSID"
+  ]
+}
