@@ -1,99 +1,251 @@
+<#
+.SYNOPSIS
+    Read-only UniFi audit script.
+
+.DESCRIPTION
+    Connects to a UniFi controller, authenticates, queries common UniFi
+    endpoints, performs basic audit checks, and exports the results to JSON
+    and CSV files.
+
+    This script is intentionally read-only. It does not modify UniFi settings.
+
+    Primary use cases:
+    - Inventory UniFi sites, networks, WLANs, clients, devices, and firewall rules
+    - Verify expected DNS settings
+    - Verify expected SSIDs exist
+    - Export current state for documentation, backup, or drift analysis
+
+.PARAMETER ControllerUrl
+    Base URL of the UniFi controller.
+
+    Examples:
+    - https://192.168.0.1
+    - https://unifi.domain.local
+
+.PARAMETER Site
+    UniFi site name to audit.
+    Defaults to "default".
+
+.PARAMETER ExpectedDnsServer
+    Optional DNS server IP expected to appear in relevant network settings.
+    Useful for checking Pi-hole enforcement.
+
+.PARAMETER ExpectedSsids
+    Optional list of SSIDs expected to exist.
+
+.PARAMETER OutputPath
+    Directory where reports will be written.
+    Defaults to .\Reports
+
+.PARAMETER SkipCertificateCheck
+    Skips TLS certificate validation.
+    Useful for self-signed certs in a homelab.
+    Avoid using this in production unless you understand the risk.
+
+.ENVIRONMENT
+    If these environment variables are present, they are used for authentication:
+    - UNIFI_USERNAME
+    - UNIFI_PASSWORD
+
+    Otherwise, the script prompts for credentials.
+
+.OUTPUTS
+    Writes JSON and CSV reports to the output directory.
+
+.EXAMPLE
+    .\UnifiAudit.ps1 `
+      -ControllerUrl "https://192.168.0.1" `
+      -Site "default" `
+      -ExpectedDnsServer "192.168.0.10" `
+      -ExpectedSsids "MainWiFi","IoTWiFi","WorkWiFi" `
+      -OutputPath ".\Reports" `
+      -SkipCertificateCheck
+
+.EXAMPLE
+    $env:UNIFI_USERNAME = "api-audit"
+    $env:UNIFI_PASSWORD = "StrongPasswordHere"
+    .\UnifiAudit.ps1 -ControllerUrl "https://unifi.local" -SkipCertificateCheck
+
+.NOTES
+    Notes on UniFi API behavior:
+    - UniFi API endpoints can vary by version and platform
+    - This script tries both modern UniFi OS and older controller-style paths
+    - Some endpoints may fail on one version and work on another
+
+    Recommended next steps after validating this script:
+    - Split functions into modules
+    - Add HTML reporting
+    - Add drift comparison against a baseline JSON file
+    - Add policy checks for firewall rules, WLAN security, and DNS enforcement
+#>
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
     [string]$ControllerUrl,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$Site = "default",
 
-    [Parameter(Mandatory = $false)]
+    [Parameter()]
     [string]$ExpectedDnsServer,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter()]
     [string[]]$ExpectedSsids = @(),
 
-    [Parameter(Mandatory = $false)]
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$OutputPath = ".\Reports",
 
-    [Parameter(Mandatory = $false)]
+    [Parameter()]
     [switch]$SkipCertificateCheck
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+#region Utility Functions
+
 function Write-Section {
-    param([string]$Message)
+    <#
+    .SYNOPSIS
+        Writes a formatted section header to the console.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
     Write-Host ""
-    Write-Host ("=" * 72) -ForegroundColor DarkGray
+    Write-Host ("=" * 78) -ForegroundColor DarkGray
     Write-Host $Message -ForegroundColor Cyan
-    Write-Host ("=" * 72) -ForegroundColor DarkGray
+    Write-Host ("=" * 78) -ForegroundColor DarkGray
 }
 
 function New-UnifiWebSession {
+    <#
+    .SYNOPSIS
+        Creates a persistent web session for UniFi API calls.
+
+    .DESCRIPTION
+        UniFi authentication relies on cookies/session state.
+        This function creates the PowerShell web session object used
+        across all requests after login.
+    #>
     [CmdletBinding()]
     param()
 
-    return New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    New-Object Microsoft.PowerShell.Commands.WebRequestSession
 }
 
 function Get-UnifiCredential {
+    <#
+    .SYNOPSIS
+        Retrieves credentials for UniFi authentication.
+
+    .DESCRIPTION
+        Uses environment variables if available:
+        - UNIFI_USERNAME
+        - UNIFI_PASSWORD
+
+        Otherwise prompts interactively.
+    #>
     [CmdletBinding()]
     param()
 
     if ($env:UNIFI_USERNAME -and $env:UNIFI_PASSWORD) {
-        $secure = ConvertTo-SecureString $env:UNIFI_PASSWORD -AsPlainText -Force
-        return [PSCredential]::new($env:UNIFI_USERNAME, $secure)
+        $securePassword = ConvertTo-SecureString $env:UNIFI_PASSWORD -AsPlainText -Force
+        return [PSCredential]::new($env:UNIFI_USERNAME, $securePassword)
     }
 
-    return Get-Credential -Message "Enter UniFi credentials"
+    Get-Credential -Message "Enter UniFi credentials"
 }
 
 function Invoke-UnifiRequest {
+    <#
+    .SYNOPSIS
+        Wrapper for UniFi API requests.
+
+    .DESCRIPTION
+        Sends authenticated REST requests using the supplied web session.
+        Adds JSON headers and optionally skips certificate validation.
+
+    .PARAMETER WebSession
+        Authenticated PowerShell web session.
+
+    .PARAMETER Method
+        HTTP method such as GET or POST.
+
+    .PARAMETER Uri
+        Fully-qualified API endpoint URI.
+
+    .PARAMETER Body
+        Optional request body object. Will be converted to JSON.
+
+    .PARAMETER SkipCertificateCheck
+        Skips TLS certificate validation.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession,
 
         [Parameter(Mandatory = $true)]
+        [ValidateSet("GET", "POST", "PUT", "PATCH", "DELETE")]
         [string]$Method,
 
         [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
         [string]$Uri,
 
-        [Parameter(Mandatory = $false)]
+        [Parameter()]
         $Body,
 
-        [Parameter(Mandatory = $false)]
+        [Parameter()]
         [switch]$SkipCertificateCheck
     )
 
-    $invokeParams = @{
+    $params = @{
         Uri         = $Uri
         Method      = $Method
         WebSession  = $WebSession
-        Headers     = @{ "Accept" = "application/json" }
+        Headers     = @{ Accept = "application/json" }
         ErrorAction = "Stop"
     }
 
     if ($SkipCertificateCheck) {
-        $invokeParams["SkipCertificateCheck"] = $true
+        $params.SkipCertificateCheck = $true
     }
 
     if ($null -ne $Body) {
-        $invokeParams["Body"] = ($Body | ConvertTo-Json -Depth 15)
-        $invokeParams["ContentType"] = "application/json"
+        $params.Body        = ($Body | ConvertTo-Json -Depth 20)
+        $params.ContentType = "application/json"
     }
 
     try {
-        return Invoke-RestMethod @invokeParams
+        Invoke-RestMethod @params
     }
     catch {
         throw "UniFi API call failed. Method=$Method Uri=$Uri Error=$($_.Exception.Message)"
     }
 }
 
+#endregion Utility Functions
+
+#region Authentication and API Discovery
+
 function Connect-UnifiController {
+    <#
+    .SYNOPSIS
+        Authenticates to the UniFi controller.
+
+    .DESCRIPTION
+        Tries the modern UniFi OS login endpoint first, then falls back
+        to the older legacy login endpoint if necessary.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -105,43 +257,58 @@ function Connect-UnifiController {
         [Parameter(Mandatory = $true)]
         [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession,
 
-        [Parameter(Mandatory = $false)]
+        [Parameter()]
         [switch]$SkipCertificateCheck
     )
 
-    $base = $ControllerUrl.TrimEnd("/")
-    $username = $Credential.UserName
-    $password = $Credential.GetNetworkCredential().Password
-
+    $baseUrl = $ControllerUrl.TrimEnd("/")
     $body = @{
-        username = $username
-        password = $password
+        username = $Credential.UserName
+        password = $Credential.GetNetworkCredential().Password
     }
 
-    Write-Host "Logging into UniFi controller: $base" -ForegroundColor Yellow
+    Write-Host "Authenticating to $baseUrl" -ForegroundColor Yellow
 
-    # Common UniFi OS login path
     try {
-        $null = Invoke-UnifiRequest -WebSession $WebSession -Method POST -Uri "$base/api/auth/login" -Body $body -SkipCertificateCheck:$SkipCertificateCheck
-        Write-Host "Login successful using /api/auth/login" -ForegroundColor Green
+        $null = Invoke-UnifiRequest `
+            -WebSession $WebSession `
+            -Method POST `
+            -Uri "$baseUrl/api/auth/login" `
+            -Body $body `
+            -SkipCertificateCheck:$SkipCertificateCheck
+
+        Write-Host "Authenticated using /api/auth/login" -ForegroundColor Green
         return
     }
     catch {
-        Write-Warning "Primary auth path failed. Trying legacy login path."
+        Write-Warning "Modern auth endpoint failed. Trying legacy endpoint."
     }
 
-    # Legacy controller login path fallback
     try {
-        $null = Invoke-UnifiRequest -WebSession $WebSession -Method POST -Uri "$base/api/login" -Body $body -SkipCertificateCheck:$SkipCertificateCheck
-        Write-Host "Login successful using /api/login" -ForegroundColor Green
+        $null = Invoke-UnifiRequest `
+            -WebSession $WebSession `
+            -Method POST `
+            -Uri "$baseUrl/api/login" `
+            -Body $body `
+            -SkipCertificateCheck:$SkipCertificateCheck
+
+        Write-Host "Authenticated using /api/login" -ForegroundColor Green
         return
     }
     catch {
-        throw "Unable to authenticate to UniFi using either /api/auth/login or /api/login."
+        throw "Authentication failed using both modern and legacy UniFi login endpoints."
     }
 }
 
 function Get-UnifiSites {
+    <#
+    .SYNOPSIS
+        Retrieves available UniFi sites.
+
+    .DESCRIPTION
+        Attempts multiple known site enumeration endpoints to maximize
+        compatibility across UniFi versions.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -150,36 +317,34 @@ function Get-UnifiSites {
         [Parameter(Mandatory = $true)]
         [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession,
 
-        [Parameter(Mandatory = $false)]
+        [Parameter()]
         [switch]$SkipCertificateCheck
     )
 
-    $base = $ControllerUrl.TrimEnd("/")
-    $siteResults = @()
-
+    $baseUrl = $ControllerUrl.TrimEnd("/")
     $candidateUris = @(
-        "$base/proxy/network/integration/v1/sites",
-        "$base/api/self/sites"
+        "$baseUrl/proxy/network/integration/v1/sites",
+        "$baseUrl/api/self/sites"
     )
 
     foreach ($uri in $candidateUris) {
         try {
-            $result = Invoke-UnifiRequest -WebSession $WebSession -Method GET -Uri $uri -SkipCertificateCheck:$SkipCertificateCheck
+            $result = Invoke-UnifiRequest `
+                -WebSession $WebSession `
+                -Method GET `
+                -Uri $uri `
+                -SkipCertificateCheck:$SkipCertificateCheck
+
+            if ($result.data) {
+                return @($result.data)
+            }
+
+            if ($result -is [System.Collections.IEnumerable] -and -not ($result -is [string])) {
+                return @($result)
+            }
 
             if ($null -ne $result) {
-                if ($result.data) {
-                    $siteResults = @($result.data)
-                }
-                elseif ($result -is [System.Collections.IEnumerable] -and -not ($result -is [string])) {
-                    $siteResults = @($result)
-                }
-                else {
-                    $siteResults = @($result)
-                }
-
-                if ($siteResults.Count -gt 0) {
-                    return $siteResults
-                }
+                return @($result)
             }
         }
         catch {
@@ -187,16 +352,22 @@ function Get-UnifiSites {
         }
     }
 
-    Write-Warning "Could not enumerate sites from known endpoints. Falling back to the provided site name only."
-    return @(
-        [pscustomobject]@{
-            name = $Site
-            desc = $Site
-        }
-    )
+    Write-Warning "Unable to enumerate sites from known endpoints."
+    return @()
 }
 
 function Get-UnifiApiData {
+    <#
+    .SYNOPSIS
+        Retrieves data from one of several possible UniFi API paths.
+
+    .DESCRIPTION
+        Tries each candidate path until one succeeds.
+        This is helpful because UniFi endpoint paths may differ by version.
+
+    .PARAMETER Paths
+        Array of path templates. Use {site} where site substitution is needed.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -211,16 +382,22 @@ function Get-UnifiApiData {
         [Parameter(Mandatory = $true)]
         [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession,
 
-        [Parameter(Mandatory = $false)]
+        [Parameter()]
         [switch]$SkipCertificateCheck
     )
 
-    $base = $ControllerUrl.TrimEnd("/")
+    $baseUrl = $ControllerUrl.TrimEnd("/")
 
     foreach ($path in $Paths) {
-        $uri = "{0}{1}" -f $base, ($path -replace "\{site\}", [uri]::EscapeDataString($Site))
+        $resolvedPath = $path -replace "\{site\}", [uri]::EscapeDataString($Site)
+        $uri = "$baseUrl$resolvedPath"
+
         try {
-            $result = Invoke-UnifiRequest -WebSession $WebSession -Method GET -Uri $uri -SkipCertificateCheck:$SkipCertificateCheck
+            $result = Invoke-UnifiRequest `
+                -WebSession $WebSession `
+                -Method GET `
+                -Uri $uri `
+                -SkipCertificateCheck:$SkipCertificateCheck
 
             if ($null -eq $result) {
                 continue
@@ -237,7 +414,7 @@ function Get-UnifiApiData {
             return @($result)
         }
         catch {
-            Write-Verbose "Failed endpoint: $uri"
+            Write-Verbose "Endpoint failed: $uri"
             continue
         }
     }
@@ -245,13 +422,28 @@ function Get-UnifiApiData {
     return @()
 }
 
+#endregion Authentication and API Discovery
+
+#region Audit Checks
+
 function Test-ExpectedDns {
+    <#
+    .SYNOPSIS
+        Checks whether the expected DNS server appears in network settings.
+
+    .DESCRIPTION
+        Looks through common DNS-related properties returned from UniFi
+        network configuration objects.
+
+        This is a best-effort audit check, not a guaranteed canonical
+        interpretation of all UniFi DNS settings.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [array]$Networks,
 
-        [Parameter(Mandatory = $false)]
+        [Parameter()]
         [string]$ExpectedDnsServer
     )
 
@@ -261,10 +453,17 @@ function Test-ExpectedDns {
         return $findings
     }
 
+    $dnsPropertyNames = @(
+        "dns1", "dns2",
+        "dns_server_1", "dns_server_2",
+        "wan_dns1", "wan_dns2",
+        "dhcpd_dns_1", "dhcpd_dns_2"
+    )
+
     foreach ($network in $Networks) {
         $dnsCandidates = @()
 
-        foreach ($propertyName in @("dns1", "dns2", "dns_server_1", "dns_server_2", "wan_dns1", "wan_dns2", "dhcpd_dns_1", "dhcpd_dns_2")) {
+        foreach ($propertyName in $dnsPropertyNames) {
             if ($network.PSObject.Properties.Name -contains $propertyName) {
                 $value = $network.$propertyName
                 if ($value) {
@@ -273,7 +472,9 @@ function Test-ExpectedDns {
             }
         }
 
-        $dnsCandidates = $dnsCandidates | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+        $dnsCandidates = $dnsCandidates |
+            Where-Object { $_ -and $_.Trim() } |
+            Select-Object -Unique
 
         if ($dnsCandidates.Count -eq 0) {
             continue
@@ -284,8 +485,8 @@ function Test-ExpectedDns {
                 Severity = "Warning"
                 Category = "DNS"
                 Object   = $network.name
-                Finding  = "Expected DNS server '$ExpectedDnsServer' not found"
-                Details  = ($dnsCandidates -join ", ")
+                Finding  = "Expected DNS server not found"
+                Details  = "Expected: $ExpectedDnsServer | Actual: $($dnsCandidates -join ', ')"
             })
         }
     }
@@ -294,12 +495,20 @@ function Test-ExpectedDns {
 }
 
 function Test-ExpectedSsids {
+    <#
+    .SYNOPSIS
+        Checks whether expected SSIDs exist.
+
+    .DESCRIPTION
+        Compares the user-supplied expected SSID list against the WLANs
+        returned from the controller.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [array]$Wlans,
 
-        [Parameter(Mandatory = $false)]
+        [Parameter()]
         [string[]]$ExpectedSsids
     )
 
@@ -309,10 +518,15 @@ function Test-ExpectedSsids {
         return $findings
     }
 
-    $actual = @($Wlans | ForEach-Object { $_.name } | Where-Object { $_ } | Select-Object -Unique)
+    $actualSsids = @(
+        $Wlans |
+        ForEach-Object { $_.name } |
+        Where-Object { $_ } |
+        Select-Object -Unique
+    )
 
     foreach ($ssid in $ExpectedSsids) {
-        if ($actual -notcontains $ssid) {
+        if ($actualSsids -notcontains $ssid) {
             $findings.Add([pscustomobject]@{
                 Severity = "Warning"
                 Category = "SSID"
@@ -327,6 +541,14 @@ function Test-ExpectedSsids {
 }
 
 function Test-UnifiAudit {
+    <#
+    .SYNOPSIS
+        Runs all configured audit checks.
+
+    .DESCRIPTION
+        Aggregates findings from individual validation functions into
+        a single collection.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -335,10 +557,10 @@ function Test-UnifiAudit {
         [Parameter(Mandatory = $true)]
         [array]$Wlans,
 
-        [Parameter(Mandatory = $false)]
+        [Parameter()]
         [string]$ExpectedDnsServer,
 
-        [Parameter(Mandatory = $false)]
+        [Parameter()]
         [string[]]$ExpectedSsids
     )
 
@@ -355,7 +577,22 @@ function Test-UnifiAudit {
     return $results
 }
 
+#endregion Audit Checks
+
+#region Export Functions
+
 function Export-UnifiAuditData {
+    <#
+    .SYNOPSIS
+        Exports audit data to JSON and CSV.
+
+    .DESCRIPTION
+        Writes each dataset to a timestamped JSON file.
+        If the dataset is enumerable, it also attempts CSV export.
+
+        JSON is the source of truth.
+        CSV is a convenience export.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -374,81 +611,133 @@ function Export-UnifiAuditData {
     foreach ($key in $Data.Keys) {
         $value = $Data[$key]
 
-        $jsonPath = Join-Path $OutputPath "$($key)_$timestamp.json"
-        $value | ConvertTo-Json -Depth 20 | Out-File -FilePath $jsonPath -Encoding utf8
+        $jsonPath = Join-Path $OutputPath "${key}_${timestamp}.json"
+        $value | ConvertTo-Json -Depth 25 | Out-File -FilePath $jsonPath -Encoding utf8
 
         if ($value -is [System.Collections.IEnumerable] -and -not ($value -is [string])) {
             try {
-                $csvPath = Join-Path $OutputPath "$($key)_$timestamp.csv"
+                $csvPath = Join-Path $OutputPath "${key}_${timestamp}.csv"
                 $value | Export-Csv -NoTypeInformation -Encoding utf8 -Path $csvPath
             }
             catch {
-                Write-Verbose "Could not export CSV for $key"
+                Write-Verbose "CSV export skipped for dataset: $key"
             }
         }
     }
 }
 
-# Main
+#endregion Export Functions
+
+#region Main Execution
+
 Write-Section "UniFi Audit Starting"
 
 $credential = Get-UnifiCredential
 $session = New-UnifiWebSession
 
-Connect-UnifiController -ControllerUrl $ControllerUrl -Credential $credential -WebSession $session -SkipCertificateCheck:$SkipCertificateCheck
+Connect-UnifiController `
+    -ControllerUrl $ControllerUrl `
+    -Credential $credential `
+    -WebSession $session `
+    -SkipCertificateCheck:$SkipCertificateCheck
 
-Write-Section "Discovering Sites"
-$sites = Get-UnifiSites -ControllerUrl $ControllerUrl -WebSession $session -SkipCertificateCheck:$SkipCertificateCheck
-$sites | Format-Table -AutoSize
+Write-Section "Enumerating Sites"
 
-if (-not ($sites | Where-Object { $_.name -eq $Site -or $_.desc -eq $Site })) {
-    Write-Warning "Requested site '$Site' was not found in the enumerated site list. Continuing anyway."
+$sites = Get-UnifiSites `
+    -ControllerUrl $ControllerUrl `
+    -WebSession $session `
+    -SkipCertificateCheck:$SkipCertificateCheck
+
+if ($sites.Count -gt 0) {
+    $sites | Format-Table -AutoSize
+}
+else {
+    Write-Warning "No sites were returned from the controller."
+}
+
+if ($sites.Count -gt 0 -and -not ($sites | Where-Object { $_.name -eq $Site -or $_.desc -eq $Site })) {
+    Write-Warning "Requested site '$Site' was not found in the returned site list. Continuing anyway."
 }
 
 Write-Section "Collecting UniFi Data"
 
-$networks = Get-UnifiApiData -ControllerUrl $ControllerUrl -Site $Site -WebSession $session -SkipCertificateCheck:$SkipCertificateCheck -Paths @(
-    "/proxy/network/api/s/{site}/rest/networkconf",
-    "/api/s/{site}/rest/networkconf"
-)
+$networks = Get-UnifiApiData `
+    -ControllerUrl $ControllerUrl `
+    -Site $Site `
+    -WebSession $session `
+    -SkipCertificateCheck:$SkipCertificateCheck `
+    -Paths @(
+        "/proxy/network/api/s/{site}/rest/networkconf",
+        "/api/s/{site}/rest/networkconf"
+    )
 
-$wlans = Get-UnifiApiData -ControllerUrl $ControllerUrl -Site $Site -WebSession $session -SkipCertificateCheck:$SkipCertificateCheck -Paths @(
-    "/proxy/network/api/s/{site}/rest/wlanconf",
-    "/api/s/{site}/rest/wlanconf"
-)
+$wlans = Get-UnifiApiData `
+    -ControllerUrl $ControllerUrl `
+    -Site $Site `
+    -WebSession $session `
+    -SkipCertificateCheck:$SkipCertificateCheck `
+    -Paths @(
+        "/proxy/network/api/s/{site}/rest/wlanconf",
+        "/api/s/{site}/rest/wlanconf"
+    )
 
-$devices = Get-UnifiApiData -ControllerUrl $ControllerUrl -Site $Site -WebSession $session -SkipCertificateCheck:$SkipCertificateCheck -Paths @(
-    "/proxy/network/api/s/{site}/stat/device",
-    "/api/s/{site}/stat/device"
-)
+$devices = Get-UnifiApiData `
+    -ControllerUrl $ControllerUrl `
+    -Site $Site `
+    -WebSession $session `
+    -SkipCertificateCheck:$SkipCertificateCheck `
+    -Paths @(
+        "/proxy/network/api/s/{site}/stat/device",
+        "/api/s/{site}/stat/device"
+    )
 
-$clients = Get-UnifiApiData -ControllerUrl $ControllerUrl -Site $Site -WebSession $session -SkipCertificateCheck:$SkipCertificateCheck -Paths @(
-    "/proxy/network/api/s/{site}/stat/sta",
-    "/api/s/{site}/stat/sta"
-)
+$clients = Get-UnifiApiData `
+    -ControllerUrl $ControllerUrl `
+    -Site $Site `
+    -WebSession $session `
+    -SkipCertificateCheck:$SkipCertificateCheck `
+    -Paths @(
+        "/proxy/network/api/s/{site}/stat/sta",
+        "/api/s/{site}/stat/sta"
+    )
 
-$firewallGroups = Get-UnifiApiData -ControllerUrl $ControllerUrl -Site $Site -WebSession $session -SkipCertificateCheck:$SkipCertificateCheck -Paths @(
-    "/proxy/network/api/s/{site}/list/firewallgroup",
-    "/api/s/{site}/list/firewallgroup"
-)
+$firewallGroups = Get-UnifiApiData `
+    -ControllerUrl $ControllerUrl `
+    -Site $Site `
+    -WebSession $session `
+    -SkipCertificateCheck:$SkipCertificateCheck `
+    -Paths @(
+        "/proxy/network/api/s/{site}/list/firewallgroup",
+        "/api/s/{site}/list/firewallgroup"
+    )
 
-$firewallRules = Get-UnifiApiData -ControllerUrl $ControllerUrl -Site $Site -WebSession $session -SkipCertificateCheck:$SkipCertificateCheck -Paths @(
-    "/proxy/network/api/s/{site}/rest/firewallrule",
-    "/api/s/{site}/rest/firewallrule"
-)
+$firewallRules = Get-UnifiApiData `
+    -ControllerUrl $ControllerUrl `
+    -Site $Site `
+    -WebSession $session `
+    -SkipCertificateCheck:$SkipCertificateCheck `
+    -Paths @(
+        "/proxy/network/api/s/{site}/rest/firewallrule",
+        "/api/s/{site}/rest/firewallrule"
+    )
 
-Write-Host ("Networks      : {0}" -f $networks.Count) -ForegroundColor Green
-Write-Host ("WLANs         : {0}" -f $wlans.Count) -ForegroundColor Green
-Write-Host ("Devices       : {0}" -f $devices.Count) -ForegroundColor Green
-Write-Host ("Clients       : {0}" -f $clients.Count) -ForegroundColor Green
-Write-Host ("FW Groups     : {0}" -f $firewallGroups.Count) -ForegroundColor Green
-Write-Host ("FW Rules      : {0}" -f $firewallRules.Count) -ForegroundColor Green
+Write-Host ("Networks       : {0}" -f $networks.Count) -ForegroundColor Green
+Write-Host ("WLANs          : {0}" -f $wlans.Count) -ForegroundColor Green
+Write-Host ("Devices        : {0}" -f $devices.Count) -ForegroundColor Green
+Write-Host ("Clients        : {0}" -f $clients.Count) -ForegroundColor Green
+Write-Host ("FirewallGroups : {0}" -f $firewallGroups.Count) -ForegroundColor Green
+Write-Host ("FirewallRules  : {0}" -f $firewallRules.Count) -ForegroundColor Green
 
-Write-Section "Running Policy Checks"
-$findings = Test-UnifiAudit -Networks $networks -Wlans $wlans -ExpectedDnsServer $ExpectedDnsServer -ExpectedSsids $ExpectedSsids
+Write-Section "Running Audit Checks"
+
+$findings = Test-UnifiAudit `
+    -Networks $networks `
+    -Wlans $wlans `
+    -ExpectedDnsServer $ExpectedDnsServer `
+    -ExpectedSsids $ExpectedSsids
 
 if ($findings.Count -eq 0) {
-    Write-Host "No policy findings." -ForegroundColor Green
+    Write-Host "No audit findings." -ForegroundColor Green
 }
 else {
     $findings | Format-Table -AutoSize
@@ -469,5 +758,9 @@ $dataToExport = @{
 
 Export-UnifiAuditData -OutputPath $OutputPath -Data $dataToExport
 
-Write-Host "Reports written to: $((Resolve-Path $OutputPath).Path)" -ForegroundColor Yellow
+$resolvedOutputPath = Resolve-Path -LiteralPath $OutputPath
+Write-Host "Reports written to: $($resolvedOutputPath.Path)" -ForegroundColor Yellow
+
 Write-Section "UniFi Audit Complete"
+
+#endregion Main Execution
