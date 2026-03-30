@@ -9,6 +9,7 @@ Summary and export logic for audit output datasets.
 1. Write-UnifiSummary
 2. Export-UnifiAuditData
 3. Get-UnifiReportBundle
+4. Export-UnifiSecurityAssessmentPackage
 
 ## Function Details
 
@@ -44,6 +45,17 @@ Export behavior:
 2. Writes JSON for every dataset
 3. Attempts CSV export for enumerable datasets
 4. Uses timestamp naming format yyyyMMdd_HHmmss
+
+### Export-UnifiSecurityAssessmentPackage
+
+Writes:
+
+1. SecurityAssessmentSnapshot_yyyyMMdd_HHmmss.json
+2. SecurityAssessmentPrompt_yyyyMMdd_HHmmss.txt
+
+The prompt file is ready to paste to an AI reviewer with assessment requirements.
+
+Supports optional sensitive value redaction before JSON export.
 
 ## Output Naming
 

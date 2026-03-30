@@ -36,6 +36,95 @@ function Get-UnifiCollectionCount {
     return 1
 }
 
+function Test-UnifiSensitivePropertyName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $patterns = @(
+        "password",
+        "passphrase",
+        "secret",
+        "private_key",
+        "privatekey",
+        "token",
+        "api_key",
+        "apikey",
+        "x_auth",
+        "auth_key",
+        "radius_secret",
+        "pre_shared",
+        "psk"
+    )
+
+    $normalized = $Name.Trim().ToLowerInvariant()
+    foreach ($pattern in $patterns) {
+        if ($normalized.Contains($pattern)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Protect-UnifiObject {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [string] -or $Value -is [ValueType]) {
+        return $Value
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $output = [ordered]@{}
+        foreach ($key in $Value.Keys) {
+            $name = [string]$key
+            if (Test-UnifiSensitivePropertyName -Name $name) {
+                $output[$name] = "REDACTED"
+            }
+            else {
+                $output[$name] = Protect-UnifiObject -Value $Value[$key]
+            }
+        }
+
+        return [pscustomobject]$output
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+        $items = New-Object System.Collections.Generic.List[object]
+        foreach ($item in $Value) {
+            $items.Add((Protect-UnifiObject -Value $item))
+        }
+
+        return @($items)
+    }
+
+    if ($Value.PSObject -and $Value.PSObject.Properties) {
+        $output = [ordered]@{}
+        foreach ($prop in $Value.PSObject.Properties) {
+            if (Test-UnifiSensitivePropertyName -Name $prop.Name) {
+                $output[$prop.Name] = "REDACTED"
+            }
+            else {
+                $output[$prop.Name] = Protect-UnifiObject -Value $prop.Value
+            }
+        }
+
+        return [pscustomobject]$output
+    }
+
+    return $Value
+}
+
 function Write-UnifiSummary {
     <#
     .SYNOPSIS
@@ -133,7 +222,84 @@ function Get-UnifiReportBundle {
     }
 }
 
+function Export-UnifiSecurityAssessmentPackage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Snapshot,
+
+        [Parameter(Mandatory = $true)]
+        [array]$Findings,
+
+        [Parameter()]
+        [switch]$RedactSensitiveData
+    )
+
+    if (-not (Test-Path -LiteralPath $OutputPath)) {
+        $null = New-Item -Path $OutputPath -ItemType Directory -Force
+    }
+
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $jsonPath = Join-Path $OutputPath "SecurityAssessmentSnapshot_${timestamp}.json"
+    $promptPath = Join-Path $OutputPath "SecurityAssessmentPrompt_${timestamp}.txt"
+
+    $snapshotToExport = if ($RedactSensitiveData) {
+        Protect-UnifiObject -Value $Snapshot
+    }
+    else {
+        $Snapshot
+    }
+
+    $snapshotToExport | ConvertTo-Json -Depth 40 | Out-File -FilePath $jsonPath -Encoding utf8
+
+    $datasetSummary = @()
+    if ($Snapshot -and $Snapshot.Data) {
+        foreach ($prop in $Snapshot.Data.PSObject.Properties) {
+            $count = Get-UnifiCollectionCount -Value $prop.Value
+            $datasetSummary += ("{0}: {1}" -f $prop.Name, $count)
+        }
+    }
+
+    $promptText = @"
+You are a network security assessor. Analyze the attached UniFi settings snapshot and provide a prioritized security assessment.
+
+Deliverables:
+1. Executive summary with top risks.
+2. High severity findings with exact setting names and values.
+3. Medium severity findings.
+4. Misconfiguration list grouped by area such as WLAN, firewall, network, routing, and device management.
+5. Recommended remediations with exact changes to apply in UniFi.
+6. Safe change order for production rollout.
+
+Context:
+Controller: $($Snapshot.ControllerUrl)
+Site: $($Snapshot.Site)
+Snapshot generated: $($Snapshot.GeneratedAt)
+Local findings count: $(@($Findings).Count)
+Sensitive field redaction: $RedactSensitiveData
+
+Datasets included:
+$($datasetSummary -join [Environment]::NewLine)
+
+Output format required:
+1. Risk table with severity, issue, impact, and fix.
+2. Detailed remediation checklist.
+3. Validation steps after changes.
+"@
+
+    $promptText | Out-File -FilePath $promptPath -Encoding utf8
+
+    return [pscustomobject]@{
+        SnapshotJson = $jsonPath
+        PromptFile   = $promptPath
+    }
+}
+
 Export-ModuleMember -Function `
     Write-UnifiSummary, `
     Export-UnifiAuditData, `
-    Get-UnifiReportBundle
+    Get-UnifiReportBundle, `
+    Export-UnifiSecurityAssessmentPackage

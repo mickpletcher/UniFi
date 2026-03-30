@@ -41,6 +41,12 @@
 .PARAMETER ExpectedSsids
     Optional override for ExpectedSsids from config.json.
 
+.PARAMETER ExportSecurityAssessment
+    When set, exports an expanded settings snapshot and AI prompt file.
+
+.PARAMETER RedactSensitiveData
+    When used with ExportSecurityAssessment, redacts sensitive values in snapshot output.
+
 .EXAMPLE
     .\UnifiAudit.ps1
 
@@ -77,7 +83,13 @@ param(
     [string]$OutputPath,
 
     [Parameter()]
-    [switch]$SkipCertificateCheck
+    [switch]$SkipCertificateCheck,
+
+    [Parameter()]
+    [switch]$ExportSecurityAssessment,
+
+    [Parameter()]
+    [switch]$RedactSensitiveData
 )
 
 Set-StrictMode -Version Latest
@@ -131,10 +143,12 @@ function Assert-UnifiDependencies {
         "Connect-UnifiController",
         "Get-UnifiSites",
         "Get-UnifiInventory",
+        "Get-UnifiSecurityAssessmentSnapshot",
         "Write-UnifiSummary",
         "Test-UnifiInventory",
         "Get-UnifiReportBundle",
-        "Export-UnifiAuditData"
+        "Export-UnifiAuditData",
+        "Export-UnifiSecurityAssessmentPackage"
     )
 
     foreach ($commandName in $requiredCommands) {
@@ -302,6 +316,8 @@ function Show-UnifiResolvedSettings {
     Write-Host ("Expected SSIDs       : {0}" -f $(if ($Settings.ExpectedSsids.Count -gt 0) { $Settings.ExpectedSsids -join ", " } else { "<not set>" })) -ForegroundColor Yellow
     Write-Host ("Output Path          : {0}" -f $Settings.OutputPath) -ForegroundColor Yellow
     Write-Host ("Skip Cert Check      : {0}" -f $Settings.SkipCertificateCheck) -ForegroundColor Yellow
+    Write-Host ("Security Export      : {0}" -f $ExportSecurityAssessment) -ForegroundColor Yellow
+    Write-Host ("Redact Sensitive     : {0}" -f $RedactSensitiveData) -ForegroundColor Yellow
 }
 
 try {
@@ -329,6 +345,10 @@ try {
     $settings.OutputPath = Resolve-UnifiOutputPath -Path $settings.OutputPath -BasePath $PSScriptRoot
 
     Show-UnifiResolvedSettings -Settings $settings
+
+    if ($RedactSensitiveData -and -not $ExportSecurityAssessment) {
+        Write-Warning "RedactSensitiveData is set but ExportSecurityAssessment is not enabled. Redaction will not be applied."
+    }
 
     Write-Section "Authenticating"
     $credential = Get-UnifiCredential
@@ -391,6 +411,25 @@ try {
         -Findings $findings
 
     Export-UnifiAuditData -OutputPath $settings.OutputPath -Data $bundle
+
+    if ($ExportSecurityAssessment) {
+        Write-Section "Exporting Security Assessment Package"
+
+        $securitySnapshot = Get-UnifiSecurityAssessmentSnapshot `
+            -ControllerUrl $settings.ControllerUrl `
+            -Site $settings.Site `
+            -WebSession $session `
+            -SkipCertificateCheck:$settings.SkipCertificateCheck
+
+        $securityPackage = Export-UnifiSecurityAssessmentPackage `
+            -OutputPath $settings.OutputPath `
+            -Snapshot $securitySnapshot `
+            -Findings $findings `
+            -RedactSensitiveData:$RedactSensitiveData
+
+        Write-Host ("Snapshot JSON        : {0}" -f $securityPackage.SnapshotJson) -ForegroundColor Green
+        Write-Host ("AI Prompt File       : {0}" -f $securityPackage.PromptFile) -ForegroundColor Green
+    }
 
     $resolvedOutput = Resolve-Path -LiteralPath $settings.OutputPath
     Write-Host ("Reports written to   : {0}" -f $resolvedOutput.Path) -ForegroundColor Green

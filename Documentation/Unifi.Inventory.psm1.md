@@ -15,6 +15,8 @@ Read only inventory collection across site level UniFi objects.
 7. Get-UnifiFirewallGroups
 8. Get-UnifiFirewallRules
 9. Get-UnifiInventory
+10. Get-UnifiEndpointCollection
+11. Get-UnifiSecurityAssessmentSnapshot
 
 ## Function Details
 
@@ -69,6 +71,28 @@ Object keys:
 4. Clients
 5. FirewallGroups
 6. FirewallRules
+
+### Get-UnifiSecurityAssessmentSnapshot
+
+Builds a broad settings snapshot for AI security review.
+
+Includes categories such as:
+
+1. SiteSettings
+2. Networks
+3. Wlans
+4. Devices
+5. Clients
+6. FirewallRules
+7. FirewallGroups
+8. PortProfiles
+9. UserGroups
+10. Routing
+11. RadiusProfiles
+12. DynamicDns
+13. ApGroups
+14. TrafficRules
+15. DHCPRelay
 
 ## Consumed By
 

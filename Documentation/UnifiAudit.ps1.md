@@ -21,6 +21,8 @@ Main orchestration script for UniFi audit collection, validation, and report exp
 | ExpectedSsids | string[] | No | from config |
 | OutputPath | string | No | from config or ./Reports |
 | SkipCertificateCheck | switch | No | from config or false |
+| ExportSecurityAssessment | switch | No | false |
+| RedactSensitiveData | switch | No | false |
 
 ## Internal Function Flow
 
@@ -45,6 +47,7 @@ Main orchestration script for UniFi audit collection, validation, and report exp
 6. Run tests
 7. Build report bundle
 8. Export reports
+9. Optionally export security assessment package
 
 ## Auth Behavior
 
