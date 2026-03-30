@@ -1,9 +1,12 @@
 {
-  "ControllerUrl": "https://unifi.yourdomain.local",
+  "ControllerUrl": "https://192.168.0.1",
   "Site": "default",
   "ExpectedDnsServer": "192.168.0.10",
-  "ExpectedLanSubnet": "192.168.0.0/24",
   "ExpectedSsids": [
-    "WiFi SSID"
-  ]
+    "Species8472_PV",
+    "Species8472_PV_IoT",
+    "Species8472_PV_Work"
+  ],
+  "OutputPath": ".\\Reports",
+  "SkipCertificateCheck": true
 }
