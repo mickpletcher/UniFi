@@ -13,6 +13,28 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Resolve-UnifiApiCollection {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $Result
+    )
+
+    if ($null -eq $Result) {
+        return @()
+    }
+
+    if ($Result.PSObject.Properties.Name -contains "data" -and $null -ne $Result.data) {
+        return @($Result.data)
+    }
+
+    if ($Result -is [System.Collections.IEnumerable] -and -not ($Result -is [string])) {
+        return @($Result)
+    }
+
+    return @($Result)
+}
+
 function Get-UnifiApiData {
     <#
     .SYNOPSIS
@@ -51,10 +73,15 @@ function Get-UnifiApiData {
         [switch]$SkipCertificateCheck
     )
 
-    $baseUrl = $ControllerUrl.TrimEnd("/")
+    $baseUrl = $ControllerUrl.Trim().TrimEnd("/")
+    $resolvedSite = $Site.Trim()
 
     foreach ($path in $Paths) {
-        $resolvedPath = $path -replace "\{site\}", [uri]::EscapeDataString($Site)
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            continue
+        }
+
+        $resolvedPath = $path -replace "\{site\}", [uri]::EscapeDataString($resolvedSite)
         $uri = "$baseUrl$resolvedPath"
 
         try {
@@ -64,22 +91,13 @@ function Get-UnifiApiData {
                 -Uri $uri `
                 -SkipCertificateCheck:$SkipCertificateCheck
 
-            if ($null -eq $result) {
-                continue
+            $collection = Resolve-UnifiApiCollection -Result $result
+            if ($collection.Count -gt 0) {
+                return $collection
             }
-
-            if ($result.data) {
-                return @($result.data)
-            }
-
-            if ($result -is [System.Collections.IEnumerable] -and -not ($result -is [string])) {
-                return @($result)
-            }
-
-            return @($result)
         }
         catch {
-            Write-Verbose "Endpoint failed: $uri"
+            Write-Verbose ("Endpoint failed: {0} | {1}" -f $uri, $_.Exception.Message)
             continue
         }
     }
@@ -104,7 +122,7 @@ function Get-UnifiSites {
         [switch]$SkipCertificateCheck
     )
 
-    $baseUrl = $ControllerUrl.TrimEnd("/")
+    $baseUrl = $ControllerUrl.Trim().TrimEnd("/")
     $candidateUris = @(
         "$baseUrl/proxy/network/integration/v1/sites",
         "$baseUrl/api/self/sites"
@@ -118,19 +136,13 @@ function Get-UnifiSites {
                 -Uri $uri `
                 -SkipCertificateCheck:$SkipCertificateCheck
 
-            if ($result.data) {
-                return @($result.data)
-            }
-
-            if ($result -is [System.Collections.IEnumerable] -and -not ($result -is [string])) {
-                return @($result)
-            }
-
-            if ($null -ne $result) {
-                return @($result)
+            $collection = Resolve-UnifiApiCollection -Result $result
+            if ($collection.Count -gt 0) {
+                return $collection
             }
         }
         catch {
+            Write-Verbose ("Site endpoint failed: {0} | {1}" -f $uri, $_.Exception.Message)
             continue
         }
     }
@@ -272,12 +284,12 @@ function Get-UnifiInventory {
     )
 
     [pscustomobject]@{
-        Networks       = Get-UnifiNetworks -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck
-        Wlans          = Get-UnifiWlans -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck
-        Devices        = Get-UnifiDevices -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck
-        Clients        = Get-UnifiClients -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck
-        FirewallGroups = Get-UnifiFirewallGroups -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck
-        FirewallRules  = Get-UnifiFirewallRules -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck
+        Networks       = @(Get-UnifiNetworks -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck)
+        Wlans          = @(Get-UnifiWlans -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck)
+        Devices        = @(Get-UnifiDevices -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck)
+        Clients        = @(Get-UnifiClients -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck)
+        FirewallGroups = @(Get-UnifiFirewallGroups -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck)
+        FirewallRules  = @(Get-UnifiFirewallRules -ControllerUrl $ControllerUrl -Site $Site -WebSession $WebSession -SkipCertificateCheck:$SkipCertificateCheck)
     }
 }
 

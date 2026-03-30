@@ -121,6 +121,29 @@ function Import-UnifiModules {
     }
 }
 
+function Assert-UnifiDependencies {
+    [CmdletBinding()]
+    param()
+
+    $requiredCommands = @(
+        "Get-UnifiCredential",
+        "New-UnifiWebSession",
+        "Connect-UnifiController",
+        "Get-UnifiSites",
+        "Get-UnifiInventory",
+        "Write-UnifiSummary",
+        "Test-UnifiInventory",
+        "Get-UnifiReportBundle",
+        "Export-UnifiAuditData"
+    )
+
+    foreach ($commandName in $requiredCommands) {
+        if (-not (Get-Command -Name $commandName -ErrorAction SilentlyContinue)) {
+            throw "Required function '$commandName' was not loaded from modules."
+        }
+    }
+}
+
 function Read-UnifiConfig {
     [CmdletBinding()]
     param(
@@ -138,6 +161,45 @@ function Read-UnifiConfig {
     catch {
         throw "Failed to parse config file '$Path'. Error: $($_.Exception.Message)"
     }
+}
+
+function Get-CleanStringArray {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Values
+    )
+
+    if ($null -eq $Values) {
+        return @()
+    }
+
+    return @(
+        $Values |
+        ForEach-Object { [string]$_ } |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+    )
+}
+
+function Resolve-UnifiOutputPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path $BasePath $Path))
 }
 
 function Resolve-UnifiSettings {
@@ -168,11 +230,32 @@ function Resolve-UnifiSettings {
         [bool]$SkipCertificateCheckOverrideValue
     )
 
-    $resolvedControllerUrl = if ($ControllerUrlOverride) { $ControllerUrlOverride } else { $Config.ControllerUrl }
-    $resolvedSite          = if ($SiteOverride) { $SiteOverride } else { $Config.Site }
-    $resolvedDns           = if ($ExpectedDnsServerOverride) { $ExpectedDnsServerOverride } else { $Config.ExpectedDnsServer }
+    $resolvedControllerUrl = if ($ControllerUrlOverride) { $ControllerUrlOverride } else { [string]$Config.ControllerUrl }
+    $resolvedSite          = if ($SiteOverride) { $SiteOverride } else { [string]$Config.Site }
+    $resolvedDns           = if ($ExpectedDnsServerOverride) { $ExpectedDnsServerOverride } else { [string]$Config.ExpectedDnsServer }
     $resolvedSsids         = if ($ExpectedSsidsOverride -and $ExpectedSsidsOverride.Count -gt 0) { $ExpectedSsidsOverride } else { @($Config.ExpectedSsids) }
-    $resolvedOutputPath    = if ($OutputPathOverride) { $OutputPathOverride } else { $Config.OutputPath }
+    $resolvedOutputPath    = if ($OutputPathOverride) { $OutputPathOverride } else { [string]$Config.OutputPath }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedControllerUrl)) {
+        $resolvedControllerUrl = $resolvedControllerUrl.Trim().TrimEnd("/")
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedSite)) {
+        $resolvedSite = $resolvedSite.Trim()
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedDns)) {
+        $resolvedDns = $resolvedDns.Trim()
+    }
+    else {
+        $resolvedDns = $null
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedOutputPath)) {
+        $resolvedOutputPath = $resolvedOutputPath.Trim()
+    }
+
+    $resolvedSsids = Get-CleanStringArray -Values $resolvedSsids
 
     $resolvedSkipCert = if ($SkipCertificateCheckOverrideProvided) {
         $SkipCertificateCheckOverrideValue
@@ -200,7 +283,7 @@ function Resolve-UnifiSettings {
         ControllerUrl        = $resolvedControllerUrl
         Site                 = $resolvedSite
         ExpectedDnsServer    = $resolvedDns
-        ExpectedSsids        = @($resolvedSsids)
+        ExpectedSsids        = $resolvedSsids
         OutputPath           = $resolvedOutputPath
         SkipCertificateCheck = $resolvedSkipCert
     }
@@ -222,8 +305,11 @@ function Show-UnifiResolvedSettings {
 }
 
 try {
+    $scriptStart = Get-Date
+
     Write-Section "Importing Modules"
     Import-UnifiModules -ModuleRoot (Join-Path $PSScriptRoot "Modules")
+    Assert-UnifiDependencies
 
     Write-Section "Loading Configuration"
     $config = Read-UnifiConfig -Path $ConfigPath
@@ -239,6 +325,8 @@ try {
         -OutputPathOverride $OutputPath `
         -SkipCertificateCheckOverrideProvided $skipOverrideProvided `
         -SkipCertificateCheckOverrideValue ([bool]$SkipCertificateCheck)
+
+    $settings.OutputPath = Resolve-UnifiOutputPath -Path $settings.OutputPath -BasePath $PSScriptRoot
 
     Show-UnifiResolvedSettings -Settings $settings
 
@@ -267,7 +355,10 @@ try {
         Write-Warning "No sites were returned from the controller."
     }
 
-    if ($sites.Count -gt 0 -and -not ($sites | Where-Object { $_.name -eq $settings.Site -or $_.desc -eq $settings.Site })) {
+    if ($sites.Count -gt 0 -and -not ($sites | Where-Object {
+        ($_.name -and $_.name.ToString().Equals($settings.Site, [System.StringComparison]::OrdinalIgnoreCase)) -or
+        ($_.desc -and $_.desc.ToString().Equals($settings.Site, [System.StringComparison]::OrdinalIgnoreCase))
+    })) {
         Write-Warning "Requested site '$($settings.Site)' was not found in the returned site list. Continuing anyway."
     }
 
@@ -304,9 +395,15 @@ try {
     $resolvedOutput = Resolve-Path -LiteralPath $settings.OutputPath
     Write-Host ("Reports written to   : {0}" -f $resolvedOutput.Path) -ForegroundColor Green
 
+    $duration = (Get-Date) - $scriptStart
+    Write-Host ("Duration             : {0}" -f $duration.ToString("hh\:mm\:ss")) -ForegroundColor Green
+
     Write-Section "UniFi Audit Complete"
 }
 catch {
-    Write-Error $_.Exception.Message
+    $duration = if ($scriptStart) { ((Get-Date) - $scriptStart).ToString("hh\:mm\:ss") } else { "00:00:00" }
+    $line = $_.InvocationInfo.ScriptLineNumber
+    $source = $_.InvocationInfo.ScriptName
+    Write-Error ("{0} (Line {1} in {2}, Duration {3})" -f $_.Exception.Message, $line, $source, $duration)
     exit 1
 }

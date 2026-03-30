@@ -13,6 +13,25 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Get-UnifiNormalizedString {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    return $text.Trim()
+}
+
 function New-UnifiFinding {
     <#
     .SYNOPSIS
@@ -51,6 +70,12 @@ function Test-UnifiExpectedDns {
     )
 
     $findings = New-Object System.Collections.Generic.List[object]
+    $expectedDns = Get-UnifiNormalizedString -Value $ExpectedDnsServer
+
+    if (-not $expectedDns) {
+        return $findings
+    }
+
     $dnsPropertyNames = @(
         "dns1", "dns2",
         "dns_server_1", "dns_server_2",
@@ -59,31 +84,29 @@ function Test-UnifiExpectedDns {
     )
 
     foreach ($network in $Networks) {
-        $dnsCandidates = @()
+        $dnsCandidates = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 
         foreach ($propertyName in $dnsPropertyNames) {
             if ($network.PSObject.Properties.Name -contains $propertyName) {
-                $value = $network.$propertyName
+                $value = Get-UnifiNormalizedString -Value $network.$propertyName
                 if ($value) {
-                    $dnsCandidates += [string]$value
+                    $null = $dnsCandidates.Add($value)
                 }
             }
         }
-
-        $dnsCandidates = $dnsCandidates | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
 
         if ($dnsCandidates.Count -eq 0) {
             continue
         }
 
-        if ($dnsCandidates -notcontains $ExpectedDnsServer) {
+        if (-not $dnsCandidates.Contains($expectedDns)) {
             $findings.Add(
                 (New-UnifiFinding `
                     -Severity "Warning" `
                     -Category "DNS" `
                     -Object ($network.name ?? "UnknownNetwork") `
                     -Finding "Expected DNS server not found" `
-                    -Details "Expected: $ExpectedDnsServer | Actual: $($dnsCandidates -join ', ')")
+                    -Details "Expected: $expectedDns | Actual: $(([string[]]$dnsCandidates) -join ', ')")
             )
         }
     }
@@ -106,15 +129,27 @@ function Test-UnifiExpectedSsids {
     )
 
     $findings = New-Object System.Collections.Generic.List[object]
-    $actualSsids = @($Wlans | ForEach-Object { $_.name } | Where-Object { $_ } | Select-Object -Unique)
+    $actualSsids = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($wlan in $Wlans) {
+        $ssidName = Get-UnifiNormalizedString -Value $wlan.name
+        if ($ssidName) {
+            $null = $actualSsids.Add($ssidName)
+        }
+    }
 
     foreach ($ssid in $ExpectedSsids) {
-        if ($actualSsids -notcontains $ssid) {
+        $expectedSsid = Get-UnifiNormalizedString -Value $ssid
+        if (-not $expectedSsid) {
+            continue
+        }
+
+        if (-not $actualSsids.Contains($expectedSsid)) {
             $findings.Add(
                 (New-UnifiFinding `
                     -Severity "Warning" `
                     -Category "SSID" `
-                    -Object $ssid `
+                    -Object $expectedSsid `
                     -Finding "Expected SSID missing")
             )
         }
@@ -137,9 +172,14 @@ function Test-UnifiOpenGuestNetwork {
     $findings = New-Object System.Collections.Generic.List[object]
 
     foreach ($wlan in $Wlans) {
-        $name = if ($wlan.name) { $wlan.name } else { "UnknownSSID" }
+        $name = Get-UnifiNormalizedString -Value $wlan.name
+        if (-not $name) {
+            $name = "UnknownSSID"
+        }
 
-        if ($wlan.security -eq "open") {
+        $security = Get-UnifiNormalizedString -Value $wlan.security
+
+        if ($security -and $security.Equals("open", [System.StringComparison]::OrdinalIgnoreCase)) {
             $findings.Add(
                 (New-UnifiFinding `
                     -Severity "Warning" `
@@ -173,19 +213,22 @@ function Test-UnifiInventory {
 
     $results = New-Object System.Collections.Generic.List[object]
 
-    if ($ExpectedDnsServer) {
-        foreach ($item in (Test-UnifiExpectedDns -Networks $Inventory.Networks -ExpectedDnsServer $ExpectedDnsServer)) {
+    $networks = @($Inventory.Networks)
+    $wlans = @($Inventory.Wlans)
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedDnsServer)) {
+        foreach ($item in (Test-UnifiExpectedDns -Networks $networks -ExpectedDnsServer $ExpectedDnsServer)) {
             $results.Add($item)
         }
     }
 
     if ($ExpectedSsids.Count -gt 0) {
-        foreach ($item in (Test-UnifiExpectedSsids -Wlans $Inventory.Wlans -ExpectedSsids $ExpectedSsids)) {
+        foreach ($item in (Test-UnifiExpectedSsids -Wlans $wlans -ExpectedSsids $ExpectedSsids)) {
             $results.Add($item)
         }
     }
 
-    foreach ($item in (Test-UnifiOpenGuestNetwork -Wlans $Inventory.Wlans)) {
+    foreach ($item in (Test-UnifiOpenGuestNetwork -Wlans $wlans)) {
         $results.Add($item)
     }
 

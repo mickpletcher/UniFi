@@ -25,6 +25,7 @@ Use this section to track script and documentation changes.
 
 | Date | Script or Doc | Change | Author |
 |---|---|---|---|
+| 2026-03-30 | UnifiAudit and module scripts | Hardened settings normalization, dependency checks, comparison logic, and export stability | Copilot |
 | 2026-03-30 | Documentation folder | Split script documentation into per script pages and added index links | Copilot |
 
 ### Changelog Entry Rules
